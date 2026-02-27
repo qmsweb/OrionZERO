@@ -1,17 +1,11 @@
 import os
 import dateparser
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # جلب التوكن من المتغيرات البيئية
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
-# تحديد المنطقة الزمنية (توقيت سلطنة عُمان GMT+4)
-# هذا يضمن دقة التذكير بغض النظر عن توقيت سيرفرات Render
-LOCAL_TIMEZONE = "Asia/Muscat"
-tz_info = ZoneInfo(LOCAL_TIMEZONE)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دالة الترحيب"""
@@ -19,7 +13,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أهلاً بك! أنا مساعدك الشخصي 🤖\n"
         "يمكنني تذكيرك بمواعيدك ومهامك.\n\n"
         "فقط أرسل لي جملة تحتوي على كلمة 'ذكرني'، مثال:\n"
-        "👉 'ذكرني غدا الساعة 9 صباحا بالذهاب للجامعة.'"
+        "👉 'ذكرني غدا الساعة 9 صباحا بموعد الطبيب'"
     )
     await update.message.reply_text(welcome_message)
 
@@ -29,18 +23,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if "ذكرني" in text:
         try:
-            # إجبار المكتبة على استخدام منطقتك الزمنية
-            settings = {'TIMEZONE': LOCAL_TIMEZONE, 'RETURN_AS_TIMEZONE_AWARE': True}
+            # حساب توقيت عُمان يدوياً (توقيت جرينتش + 4 ساعات) لتجنب تعارض المكتبات
+            oman_now = datetime.utcnow() + timedelta(hours=4)
+            
+            # إعدادات المكتبة لتفهم الوقت بناءً على وقتنا الحالي المحلي
+            settings = {
+                'TIMEZONE': 'Asia/Muscat',
+                'RELATIVE_BASE': oman_now
+            }
+            
             dates = dateparser.search.search_dates(text, languages=['ar'], settings=settings)
             
             if dates:
                 date_str, dt = dates[0]
                 
-                # جلب الوقت الحالي حسب منطقتك الزمنية
-                now = datetime.now(tz_info)
+                # توحيد نوع الوقت لمنع أخطاء المقارنة
+                dt = dt.replace(tzinfo=None)
                 
                 # حساب الثواني المتبقية
-                delay = (dt - now).total_seconds()
+                delay = (dt - oman_now).total_seconds()
                 
                 if delay > 0:
                     context.job_queue.run_once(
@@ -50,18 +51,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         data=text
                     )
                     
-                    # تنسيق الوقت لعرضه لك بصيغة جميلة (صباحاً/مساءً)
+                    # تنسيق الوقت لعرضه لك
                     formatted_time = dt.strftime('%Y-%m-%d %I:%M %p')
                     await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأقوم بتذكيرك في:\n⏰ {formatted_time}")
                 else:
-                    await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! تأكد من كتابة الوقت بشكل صحيح (مثال: غدا الساعة 5 مساءً).")
+                    await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! تأكد من كتابة الوقت في المستقبل.")
             else:
-                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح مثل: 'بعد ساعتين' أو 'غدا الساعة 5 مساءً'.")
+                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح مثل: 'بعد دقيقة' أو 'غدا الساعة 5 مساءً'.")
                 
         except Exception as e:
-            # في حال حدث أي خطأ برمجي يتم إخبارك بدلاً من التجاهل الصامت
-            print(f"Error: {e}")
-            await update.message.reply_text("حدث خطأ غير متوقع أثناء فهم الوقت، يرجى المحاولة بصيغة أخرى.")
+            # طباعة الخطأ في سجلات Render لمراجعته إذا لزم الأمر
+            print(f"Error details: {e}")
+            await update.message.reply_text("عذراً، حدث خطأ أثناء حساب الوقت. جرب صيغة أخرى.")
     else:
         await update.message.reply_text("أنا جاهز! ابدأ رسالتك بكلمة 'ذكرني' لضبط التذكير.")
 
@@ -90,7 +91,6 @@ def main():
             webhook_url=f"https://{RENDER_URL}/{TOKEN}"
         )
     else:
-        print("Bot is running locally...")
         application.run_polling()
 
 if __name__ == '__main__':
