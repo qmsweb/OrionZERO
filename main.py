@@ -11,7 +11,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دالة الترحيب"""
     welcome_message = (
-        "أهلاً بك! أنا مساعدك الشخصي 🤖\n"
+        "مرحبًا! أنا أوريون\n"
         "يمكنني تذكيرك بمواعيدك ومهامك.\n\n"
         "فقط أرسل لي جملة تحتوي على كلمة 'ذكرني'، مثال:\n"
         "👉 'ذكرني غدا الساعة 9 صباحا بموعد الطبيب'"
