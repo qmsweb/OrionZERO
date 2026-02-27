@@ -1,7 +1,7 @@
 import os
-import dateparser
 from datetime import datetime, timedelta
-import traceback
+# استدعاء أداة البحث بشكل مباشر وصحيح لحل المشكلة
+from dateparser.search import search_dates 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -32,7 +32,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'RELATIVE_BASE': oman_now
             }
             
-            dates = dateparser.search.search_dates(text, languages=['ar'], settings=settings)
+            # استخدام أداة البحث مباشرة
+            dates = search_dates(text, languages=['ar'], settings=settings)
             
             if dates:
                 date_str, dt = dates[0]
@@ -53,10 +54,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! تأكد من كتابة الوقت في المستقبل.")
             else:
-                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح.")
+                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح مثل: 'بعد 5 دقائق' أو 'غدا 9 مساء'.")
                 
         except Exception as e:
-            # هنا التعديل السحري: البوت سيرسل لنا الخطأ التقني مباشرة لنعرف حله!
             error_name = type(e).__name__
             error_details = str(e)
             await update.message.reply_text(f"⚠️ اكتشفت خطأ برمجياً، أرجو إرسال هذه الرسالة للمطور:\n\n{error_name}: {error_details}")
