@@ -78,7 +78,8 @@ def main():
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            webhook_url=f"https://{RENDER_URL}"
+            url_path=TOKEN, # إضافة التوكن كمسار أمان
+            webhook_url=f"https://{RENDER_URL}/{TOKEN}"
         )
     else:
         # إذا كان الكود يعمل على حاسوبك الشخصي (للتجربة)
