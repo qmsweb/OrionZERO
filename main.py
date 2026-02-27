@@ -1,6 +1,7 @@
 import os
 import dateparser
 from datetime import datetime, timedelta
+import traceback
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -23,10 +24,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if "ذكرني" in text:
         try:
-            # حساب توقيت عُمان يدوياً (توقيت جرينتش + 4 ساعات) لتجنب تعارض المكتبات
+            # حساب توقيت عُمان يدوياً (توقيت جرينتش + 4 ساعات)
             oman_now = datetime.utcnow() + timedelta(hours=4)
             
-            # إعدادات المكتبة لتفهم الوقت بناءً على وقتنا الحالي المحلي
             settings = {
                 'TIMEZONE': 'Asia/Muscat',
                 'RELATIVE_BASE': oman_now
@@ -36,11 +36,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if dates:
                 date_str, dt = dates[0]
-                
-                # توحيد نوع الوقت لمنع أخطاء المقارنة
                 dt = dt.replace(tzinfo=None)
                 
-                # حساب الثواني المتبقية
                 delay = (dt - oman_now).total_seconds()
                 
                 if delay > 0:
@@ -51,18 +48,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         data=text
                     )
                     
-                    # تنسيق الوقت لعرضه لك
                     formatted_time = dt.strftime('%Y-%m-%d %I:%M %p')
                     await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأقوم بتذكيرك في:\n⏰ {formatted_time}")
                 else:
                     await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! تأكد من كتابة الوقت في المستقبل.")
             else:
-                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح مثل: 'بعد دقيقة' أو 'غدا الساعة 5 مساءً'.")
+                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح.")
                 
         except Exception as e:
-            # طباعة الخطأ في سجلات Render لمراجعته إذا لزم الأمر
-            print(f"Error details: {e}")
-            await update.message.reply_text("عذراً، حدث خطأ أثناء حساب الوقت. جرب صيغة أخرى.")
+            # هنا التعديل السحري: البوت سيرسل لنا الخطأ التقني مباشرة لنعرف حله!
+            error_name = type(e).__name__
+            error_details = str(e)
+            await update.message.reply_text(f"⚠️ اكتشفت خطأ برمجياً، أرجو إرسال هذه الرسالة للمطور:\n\n{error_name}: {error_details}")
     else:
         await update.message.reply_text("أنا جاهز! ابدأ رسالتك بكلمة 'ذكرني' لضبط التذكير.")
 
