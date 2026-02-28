@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timedelta
 from dateparser.search import search_dates 
 from telegram import Update
@@ -14,27 +15,31 @@ def get_oman_time():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دالة الترحيب"""
     welcome_message = (
-        "أهلاً بك! أنا مساعدك الشخصي 🤖\n"
+        "أنا أوريون، مساعدك الشخصي\n"
         "يمكنني تذكيرك بمواعيدك ومهامك.\n\n"
-        "أوامر يمكنك استخدامها:\n"
-        "1️⃣ للجدولة قل: 'ذكرني غدا الساعة 9 صباحا بكذا'\n"
-        "2️⃣ لمعرفة الوقت قل: 'كم الوقت'\n"
-        "3️⃣ لمعرفة تذكيراتك قل: 'تذكيراتي'\n"
+        "أوامر يمكنك استخدامها بأي صيغة تشبه:\n"
+        "1️⃣ للجدولة: 'ذكرني بكرة 9 الصبح أرسل الإيميل'\n"
+        "2️⃣ للوقت: 'كم الساعة؟' أو 'الوقت الآن'\n"
+        "3️⃣ للتذكيرات: 'وش مهامي؟' أو 'قائمة التذكيرات'\n"
+        "4️⃣ للإلغاء: 'امسح كل التذكيرات'\n"
     )
     await update.message.reply_text(welcome_message)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة النصوص وتوزيع المهام"""
-    text = update.message.text
+    """معالجة النصوص وتوزيع المهام بمرونة (التخمين)"""
+    # تحويل النص لأحرف صغيرة وتجاهل المسافات الزائدة لتسهيل البحث
+    text = update.message.text.lower().strip()
     
-    # 1. أمر الاستعلام عن الوقت
-    if "الوقت" in text and "ذكرني" not in text:
-        now_str = get_oman_time().strftime('%Y-%m-%d %I:%M %p')
-        await update.message.reply_text(f"🕰️ الوقت الحالي لدي هو:\n{now_str}")
-        return
+    # 1. التخمين لطلب الوقت
+    if any(word in text for word in ["وقت", "ساعة", "توقيت", "ساعتك"]):
+        if not any(word in text for word in ["ذكرني", "نبهني"]): # لتجنب التعارض مع الجدولة
+            now_str = get_oman_time().strftime('%Y-%m-%d %I:%M %p')
+            # إضافة لمسة محلية لعرض التوقيت
+            await update.message.reply_text(f"🕰️ الوقت الحالي (بتوقيت إبراء/عُمان) هو:\n{now_str}")
+            return
 
-    # 2. أمر الاستعلام عن قائمة التذكيرات
-    if "تذكيراتي" in text or "التذكيرات" in text:
+    # 2. التخمين لقائمة التذكيرات
+    if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة", "جدول"]):
         jobs = context.job_queue.jobs()
         if not jobs:
             await update.message.reply_text("📭 ليس لديك أي تذكيرات مجدولة حالياً.")
@@ -48,8 +53,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # 3. أمر إضافة تذكير جديد
-    if "ذكرني" in text:
+    # 3. ميزة جديدة: إلغاء التذكيرات
+    if any(word in text for word in ["الغاء", "إلغاء", "امسح", "احذف", "حذف"]):
+        jobs = context.job_queue.jobs()
+        if not jobs:
+            await update.message.reply_text("📭 لا يوجد شيء لإلغائه أصلاً.")
+            return
+        for job in jobs:
+            job.schedule_removal()
+        await update.message.reply_text("🗑️ تم إلغاء ومسح جميع التذكيرات بنجاح.")
+        return
+
+    # 4. التخمين لإضافة تذكير واستخراج المهمة
+    if any(word in text for word in ["ذكرني", "نبهني", "تذكير", "ذكر"]):
         try:
             oman_now = get_oman_time()
             settings = {
@@ -57,7 +73,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'RELATIVE_BASE': oman_now
             }
             
-            dates = search_dates(text, languages=['ar'], settings=settings)
+            dates = search_dates(text, languages=['ar', 'en'], settings=settings)
             
             if dates:
                 date_str, dt = dates[0]
@@ -66,37 +82,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 delay = (dt - oman_now).total_seconds()
                 
                 if delay > 0:
-                    # أضفنا نص الرسالة ووقت التذكير في بيانات الوظيفة (job.data) لتظهر في القائمة
+                    # استخراج المهمة: تنظيف النص من الوقت والكلمات المفتاحية
+                    task_text = text.replace(date_str, "").replace("ذكرني", "").replace("نبهني", "").replace("بـ", "").replace("أن", "").strip()
+                    if not task_text or task_text == "ب":
+                        task_text = "تذكير عام (لم تحدد مهمة)"
+
                     formatted_time = dt.strftime('%Y-%m-%d %I:%M %p')
-                    job_info = f"تذكير: '{text}' (⏰ {formatted_time})"
+                    job_info = f"المهمة: '{task_text}' (⏰ {formatted_time})"
                     
                     context.job_queue.run_once(
                         send_reminder,
                         delay,
                         chat_id=update.effective_chat.id,
-                        data=job_info # حفظ تفاصيل التذكير هنا
+                        data=job_info 
                     )
                     
-                    await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأقوم بتذكيرك في:\n⏰ {formatted_time}")
+                    await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأنبهك بـ: {task_text}\n⏰ الوقت: {formatted_time}")
                 else:
-                    await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! تأكد من كتابة الوقت في المستقبل.")
+                    await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي! يرجى المحاولة بصيغة أخرى للمستقبل.")
             else:
-                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ أوضح مثل: 'بعد دقيقتين'.")
+                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. حاول استخدام صيغ مثل: 'نبهني بعد 10 دقائق'.")
                 
         except Exception as e:
-            error_name = type(e).__name__
-            error_details = str(e)
-            await update.message.reply_text(f"⚠️ اكتشفت خطأ برمجياً:\n{error_name}: {error_details}")
+            # رسالة خطأ أكثر وضوحاً
+            await update.message.reply_text(f"حدث خطأ غير متوقع أثناء فهم الوقت، يرجى المحاولة بصيغة أخرى.\n(تفاصيل برمجية للمطور: {str(e)})")
     else:
-        await update.message.reply_text("أنا جاهز! يمكنك قول 'الوقت'، 'تذكيراتي'، أو 'ذكرني بـ...'")
+        # رد مرن إذا لم يفهم البوت النية
+        await update.message.reply_text("لم أفهم طلبك تماماً 🤔. يمكنك سؤالي عن 'الوقت'، أو قول 'ذكرني بـ...'")
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     """إرسال الإشعار للمستخدم"""
     job = context.job
-    # job.data تحتوي الآن على النص والوقت المنسق
     await context.bot.send_message(
         chat_id=job.chat_id, 
-        text=f"🔔 حان وقت التذكير الذي طلبته:\n\n{job.data}"
+        text=f"🔔 حان الموعد!\n\n{job.data}"
     )
 
 def main():
@@ -116,6 +135,7 @@ def main():
             webhook_url=f"https://{RENDER_URL}/{TOKEN}"
         )
     else:
+        print("Bot is running...")
         application.run_polling()
 
 if __name__ == '__main__':
