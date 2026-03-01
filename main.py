@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from dateparser.search import search_dates 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from supabase import create_client, Client
 import google.generativeai as genai
@@ -59,18 +59,27 @@ async def load_pending_reminders(application: Application):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = (
         "أهلاً بك! أنا مساعدك الشخصي 🤖\n\n"
-        "1️⃣ للجدولة: 'ذكرني بكرة 9 الصبح' أو 'ذكرني بعد 10 دقائق'\n"
-        "2️⃣ للقائمة: 'قائمة التذكيرات'\n"
-        "3️⃣ للحذف: 'احذف التذكير 1'\n"
-        "4️⃣ للوقت: 'كم الساعة'\n"
-        "💬 أو تحدث معي وسأجيبك باختصار!"
+        "اختر من القائمة بالأسفل، أو تحدث معي مباشرة!"
     )
-    await update.message.reply_text(welcome_message)
+    
+    # تصميم الأزرار
+    keyboard = [
+        [KeyboardButton("➕ إضافة تذكير جديد")],
+        [KeyboardButton("📋 تذكيراتي"), KeyboardButton("⏱️ الوقت الحالي")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower().strip()
     chat_id = update.effective_chat.id
     
+    # --- التفاعل مع زر الإضافة ---
+    if text == "➕ إضافة تذكير جديد":
+        await update.message.reply_text("أرسل لي التذكير الآن!\nمثال: 'ذكرني بعد 10 دقائق أشرب قهوة'")
+        return
+
     # --- 1. قائمة التذكيرات ---
     if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة"]):
         now_oman = get_oman_time().isoformat()
