@@ -1,0 +1,16 @@
+name: Keep Render App Awake
+
+on:
+  schedule:
+    # هذا السطر يخبر السيرفر بالعمل كل 10 دقائق
+    - cron: "*/10 * * * *"
+  # هذا السطر يسمح لك بتشغيل السكربت يدوياً من لوحة تحكم جيت هب للتبويب
+  workflow_dispatch: 
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render URL
+        # هذا الأمر يقوم بزيارة رابط تطبيقك بصمت
+        run: curl -s https://orionzero.onrender.com > /dev/null
