@@ -1,4 +1,5 @@
 import os
+import re  # مكتبة مدمجة في بايثون (لا تحتاج تثبيت) لتحليل النصوص بذكاء
 from datetime import datetime, timedelta
 from dateparser.search import search_dates 
 from telegram import Update
@@ -82,7 +83,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower().strip()
     chat_id = update.effective_chat.id
     
-    # 1. قائمة التذكيرات
+    # 1. قائمة التذكيرات (معدلة لتعرض صباحاً/مساءً)
     if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة"]):
         now_utc = get_utc_now().isoformat()
         response = supabase.table("reminders").select("*").gte("remind_at", now_utc).eq("chat_id", chat_id).execute()
@@ -94,23 +95,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📋 قائمة التذكيرات المجدولة:\n\n"
         for i, row in enumerate(response.data, 1):
             task_time_oman = datetime.fromisoformat(row['remind_at']) + timedelta(hours=4)
-            formatted_time = task_time_oman.strftime('%Y-%m-%d %I:%M %p')
-            msg += f"{i}. {row['task']} (⏰ {formatted_time})\n"
+            # تحويل الوقت للغة العربية
+            arabic_period = "صباحاً" if task_time_oman.hour < 12 else "مساءً"
+            formatted_time = f"{task_time_oman.strftime('%I').lstrip('0')}:{task_time_oman.strftime('%M')} {arabic_period}"
+            formatted_date = task_time_oman.strftime('%Y-%m-%d')
+            
+            msg += f"{i}. {row['task']} (⏰ {formatted_date} - {formatted_time})\n"
             
         await update.message.reply_text(msg)
         return
 
-    # 2. الوقت
+    # 2. الوقت (معدلة لتعرض صباحاً/مساءً)
     if any(word in text for word in ["الوقت", "الساعة"]):
-        now_oman = get_oman_time().strftime('%Y-%m-%d %I:%M %p')
-        await update.message.reply_text(f"⏱️ الوقت الحالي هو: {now_oman}")
+        now_oman = get_oman_time()
+        arabic_period = "صباحاً" if now_oman.hour < 12 else "مساءً"
+        formatted_now = f"{now_oman.strftime('%I').lstrip('0')}:{now_oman.strftime('%M')} {arabic_period}"
+        await update.message.reply_text(f"⏱️ الوقت الحالي هو: {formatted_now}")
         return
 
-    # 3. إنشاء وحفظ التذكير في Supabase
+    # 3. إنشاء وحفظ التذكير بذكاء تام
     if any(word in text for word in ["ذكرني", "نبهني", "تذكير", "ذكر"]):
         try:
             oman_now = get_oman_time()
-            settings = {'TIMEZONE': 'Asia/Muscat', 'RELATIVE_BASE': oman_now}
+            settings = {'TIMEZONE': 'Asia/Muscat', 'RELATIVE_BASE': oman_now, 'PREFER_DATES_FROM': 'future'}
             
             dates = search_dates(text, languages=['ar', 'en'], settings=settings)
             
@@ -118,6 +125,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date_str, dt_oman = dates[0]
                 dt_oman = dt_oman.replace(tzinfo=None)
                 
+                # --- بداية التعديل الذكي لفهم الوقت والأرقام ---
+                # التحقق مما إذا كان الوقت المكتوب هو وقت نسبي (مثل: بعد 5 دقائق، كمان ساعة)
+                relative_keywords = ['بعد', 'كمان', 'in', 'after', 'دقائق', 'دقيقة', 'ساعة', 'ساعات', 'يوم', 'ايام']
+                is_relative = any(word in date_str.lower() for word in relative_keywords)
+                
+                if not is_relative:
+                    # فحص إذا كان المستخدم قد حدد الفترة الزمنية صراحة في النص
+                    has_am_pm = bool(re.search(r'\b(ص|م|صباح|مساء|am|pm)\b', text.lower()))
+                    
+                    # إذا لم يتم تحديد الفترة وكانت الساعة بنظام 12 (من 1 إلى 11)
+                    if not has_am_pm and 1 <= dt_oman.hour <= 11:
+                        dt_am = dt_oman.replace(hour=dt_oman.hour)
+                        dt_pm = dt_oman.replace(hour=dt_oman.hour + 12)
+                        
+                        # اختيار الوقت الأقرب بناءً على المقارنة بالوقت الحالي
+                        if dt_am < oman_now and dt_pm > oman_now:
+                            dt_oman = dt_pm
+                        elif dt_am > oman_now and dt_pm > oman_now:
+                            dt_oman = dt_am if (dt_am - oman_now) < (dt_pm - oman_now) else dt_pm
+                        elif dt_am < oman_now and dt_pm < oman_now:
+                            # إذا كان كلاهما في الماضي، نعتمد الصباح لليوم التالي
+                            dt_oman = dt_am + timedelta(days=1)
+                
+                # طبقة حماية إضافية: إذا كان الوقت النهائي لا يزال في الماضي، أضف يوماً
+                if dt_oman < oman_now:
+                    dt_oman += timedelta(days=1)
+                # --- نهاية التعديل الذكي ---
+
                 dt_utc = dt_oman - timedelta(hours=4)
                 delay = (dt_utc - get_utc_now()).total_seconds()
                 
@@ -126,7 +161,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not task_text or task_text == "ب":
                         task_text = "تذكير عام"
 
-                    # --> هنا يتم حفظ التذكير في Supabase <--
+                    # حفظ التذكير في Supabase
                     insert_response = supabase.table("reminders").insert({
                         "chat_id": chat_id,
                         "task": task_text,
@@ -142,7 +177,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         data={"db_id": db_id, "task": task_text}
                     )
                     
-                    await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأنبهك بـ: {task_text}")
+                    # تجهيز رسالة التأكيد باللغة العربية
+                    arabic_period = "صباحاً" if dt_oman.hour < 12 else "مساءً"
+                    formatted_time = f"{dt_oman.strftime('%I').lstrip('0')}:{dt_oman.strftime('%M')} {arabic_period}"
+                    formatted_date = dt_oman.strftime('%Y-%m-%d')
+                    
+                    await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأنبهك بـ: {task_text}\n⏰ الموعد: {formatted_time} ({formatted_date})")
                 else:
                     await update.message.reply_text("عذراً، هذا الوقت يبدو أنه في الماضي!")
             else:
