@@ -26,31 +26,25 @@ if GEMINI_API_KEY:
 else:
     model = None
 
-# تم توحيد التوقيت ليكون توقيت عُمان (GMT+4) في كل مكان بما في ذلك قاعدة البيانات
 def get_oman_time():
     return datetime.utcnow() + timedelta(hours=4)
+
+# ذاكرة مؤقتة لمعرفة من ضغط على زر "إضافة تذكير"
+awaiting_reminder_users = set()
 
 async def load_pending_reminders(application: Application):
     print("جاري التحقق من التذكيرات المعلقة في قاعدة البيانات...")
     now_oman = get_oman_time().isoformat()
-    
     try:
-        # البحث بناءً على توقيت عُمان
         response = supabase.table("reminders").select("*").gte("remind_at", now_oman).execute()
         reminders = response.data
-        
         for row in reminders:
             remind_at = datetime.fromisoformat(row['remind_at'])
             delay = (remind_at - get_oman_time()).total_seconds()
-            
             if delay > 0:
                 job_info = {"db_id": row['id'], "task": row['task']}
                 application.job_queue.run_once(
-                    send_reminder,
-                    delay,
-                    chat_id=row['chat_id'],
-                    name=str(row['id']), # تسمية المهمة لتسهيل إيقافها لاحقاً
-                    data=job_info
+                    send_reminder, delay, chat_id=row['chat_id'], name=str(row['id']), data=job_info
                 )
         print(f"تمت إعادة جدولة {len(reminders)} تذكير بنجاح.")
     except Exception as e:
@@ -61,95 +55,104 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أهلاً بك! أنا مساعدك الشخصي 🤖\n\n"
         "اختر من القائمة بالأسفل، أو تحدث معي مباشرة!"
     )
-    
-    # تصميم الأزرار
     keyboard = [
         [KeyboardButton("➕ إضافة تذكير جديد")],
         [KeyboardButton("📋 تذكيراتي"), KeyboardButton("⏱️ الوقت الحالي")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower().strip()
+    text = update.message.text.strip()
+    text_lower = text.lower()
     chat_id = update.effective_chat.id
     
-    # --- التفاعل مع زر الإضافة ---
+    # --- 1. التفاعل المباشر والصارم مع الأزرار ---
     if text == "➕ إضافة تذكير جديد":
-        await update.message.reply_text("أرسل لي التذكير الآن!\nمثال: 'ذكرني بعد 10 دقائق أشرب قهوة'")
+        awaiting_reminder_users.add(chat_id) # حفظ حالة المستخدم
+        await update.message.reply_text("أرسل لي التذكير والوقت الآن!\nمثال: 'المحاضرة بعد 10 دقائق' أو 'المحاضرة 10:40 صباحا'")
         return
 
-    # --- 1. قائمة التذكيرات ---
-    if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة"]):
+    if text == "📋 تذكيراتي":
+        awaiting_reminder_users.discard(chat_id) # إلغاء حالة التذكير إن وجدت
         now_oman = get_oman_time().isoformat()
         response = supabase.table("reminders").select("*").gte("remind_at", now_oman).eq("chat_id", chat_id).order("remind_at").execute()
-        
         if not response.data:
             await update.message.reply_text("📭 ليس لديك أي تذكيرات مجدولة حالياً.")
             return
-            
         msg = "📋 قائمة التذكيرات المجدولة:\n\n"
         for i, row in enumerate(response.data, 1):
-            task_time_oman = datetime.fromisoformat(row['remind_at']) # الوقت محفوظ أصلاً بتوقيت عُمان
+            task_time_oman = datetime.fromisoformat(row['remind_at'])
             arabic_period = "صباحاً" if task_time_oman.hour < 12 else "مساءً"
             formatted_time = f"{task_time_oman.strftime('%I').lstrip('0')}:{task_time_oman.strftime('%M')} {arabic_period}"
-            formatted_date = task_time_oman.strftime('%Y-%m-%d')
-            
-            msg += f"{i}. {row['task']} (⏰ {formatted_date} - {formatted_time})\n"
-            
+            msg += f"{i}. {row['task']} (⏰ {task_time_oman.strftime('%Y-%m-%d')} - {formatted_time})\n"
         await update.message.reply_text(msg)
         return
 
-    # --- 2. حذف تذكير ---
-    if any(word in text for word in ["احذف", "إلغاء", "حذف", "الغي"]) and "تذكير" in text:
-        match = re.search(r'\d+', text)
-        if match:
-            idx = int(match.group()) - 1
-            now_oman = get_oman_time().isoformat()
-            response = supabase.table("reminders").select("*").gte("remind_at", now_oman).eq("chat_id", chat_id).order("remind_at").execute()
-            
-            if 0 <= idx < len(response.data):
-                target_id = response.data[idx]['id']
-                # حذف من القاعدة
-                supabase.table("reminders").delete().eq("id", target_id).execute()
-                # إيقاف المؤقت
-                current_jobs = context.job_queue.get_jobs_by_name(str(target_id))
-                for job in current_jobs:
-                    job.schedule_removal()
-                
-                await update.message.reply_text(f"✅ تم حذف التذكير رقم {idx + 1} بنجاح.")
-            else:
-                await update.message.reply_text("❌ الرقم غير صحيح. قل 'قائمة التذكيرات' لمعرفة الأرقام الصحيحة.")
-        else:
-             await update.message.reply_text("❌ يرجى تحديد رقم التذكير، مثال: 'احذف التذكير 1'")
-        return
-
-    # --- 3. الوقت ---
-    if any(word in text for word in ["الوقت", "الساعة"]):
+    if text == "⏱️ الوقت الحالي":
+        awaiting_reminder_users.discard(chat_id)
         now_oman = get_oman_time()
         arabic_period = "صباحاً" if now_oman.hour < 12 else "مساءً"
         await update.message.reply_text(f"⏱️ الوقت الحالي هو: {now_oman.strftime('%I').lstrip('0')}:{now_oman.strftime('%M')} {arabic_period}")
         return
 
-    # --- 4. إنشاء تذكير (معالج ذكي للأوقات النسبية والمطلقة) ---
-    if any(word in text for word in ["ذكرني", "نبهني", "تذكير", "ذكر"]):
+    # --- 2. حذف تذكير ---
+    if any(word in text_lower for word in ["احذف", "إلغاء", "حذف", "الغي"]) and "تذكير" in text_lower:
+        match = re.search(r'\d+', text)
+        if match:
+            idx = int(match.group()) - 1
+            now_oman = get_oman_time().isoformat()
+            response = supabase.table("reminders").select("*").gte("remind_at", now_oman).eq("chat_id", chat_id).order("remind_at").execute()
+            if 0 <= idx < len(response.data):
+                target_id = response.data[idx]['id']
+                supabase.table("reminders").delete().eq("id", target_id).execute()
+                current_jobs = context.job_queue.get_jobs_by_name(str(target_id))
+                for job in current_jobs:
+                    job.schedule_removal()
+                await update.message.reply_text(f"✅ تم حذف التذكير رقم {idx + 1} بنجاح.")
+            else:
+                await update.message.reply_text("❌ الرقم غير صحيح. قل 'تذكيراتي' لمعرفة الأرقام الصحيحة.")
+        else:
+             await update.message.reply_text("❌ يرجى تحديد رقم التذكير، مثال: 'احذف التذكير 1'")
+        return
+
+    # --- 3. معالجة وإنشاء التذكير (بذكاء فائق) ---
+    # يتحقق إذا كان المستخدم ضغط على الزر سابقاً، أو كتب كلمة "ذكرني"
+    is_reminder_intent = chat_id in awaiting_reminder_users or any(word in text_lower for word in ["ذكرني", "نبهني", "تذكير", "ذكر"])
+    
+    if is_reminder_intent:
+        if chat_id in awaiting_reminder_users:
+            awaiting_reminder_users.remove(chat_id) # مسح الحالة بعد استلام الطلب
+            
         try:
             oman_now = get_oman_time()
-            # ترجمة مبدئية مخفية للكلمات النسبية لضمان فهم dateparser لها بدقة 100%
-            norm_text = text.replace("بعد", "in").replace("دقيقة", "minute").replace("دقائق", "minutes").replace("ساعة", "hour").replace("ساعات", "hours")
+            dt_oman = None
+            date_str = ""
             
-            settings = {'TIMEZONE': 'Asia/Muscat', 'RELATIVE_BASE': oman_now, 'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': False}
-            dates = search_dates(norm_text, languages=['ar', 'en'], settings=settings)
+            # أ. الخوارزمية اليدوية الجديدة: اصطياد الأوقات النسبية (بعد X دقائق/ساعات/أيام)
+            rel_match = re.search(r'بعد\s+(\d+)\s*(دقيق|ساع|يوم|ايام)', text_lower)
+            if rel_match:
+                num = int(rel_match.group(1))
+                unit = rel_match.group(2)
+                if 'دقيق' in unit:
+                    dt_oman = oman_now + timedelta(minutes=num)
+                elif 'ساع' in unit:
+                    dt_oman = oman_now + timedelta(hours=num)
+                elif 'يوم' in unit or 'ايام' in unit:
+                    dt_oman = oman_now + timedelta(days=num)
+                date_str = rel_match.group(0) # استخراج النص المحتوي على الوقت لإزالته لاحقاً
             
-            if dates:
-                date_str, dt_oman = dates[0]
+            # ب. استخدام المكتبة فقط للأوقات الثابتة (مثل 10:40 صباحا)
+            else:
+                settings = {'TIMEZONE': 'Asia/Muscat', 'RELATIVE_BASE': oman_now, 'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': False}
+                dates = search_dates(text_lower, languages=['ar', 'en'], settings=settings)
                 
-                # المعالجة الذكية (صباحاً/مساءً) للأوقات المطلقة فقط (مثل الساعة 5)
-                is_relative = any(word in date_str.lower() for word in ['in', 'minute', 'hour', 'day', 'tomorrow'])
-                if not is_relative:
-                    has_am_pm = bool(re.search(r'\b(ص|م|صباح|مساء|am|pm)\b', text.lower()))
-                    if not has_am_pm and 1 <= dt_oman.hour <= 11:
+                if dates:
+                    date_str, dt_oman = dates[0]
+                    has_am_pm = bool(re.search(r'\b(ص|م|صباح|مساء|am|pm)\b', text_lower))
+                    is_relative = any(word in date_str.lower() for word in ['in', 'minute', 'hour', 'day', 'tomorrow'])
+                    
+                    if not is_relative and not has_am_pm and 1 <= dt_oman.hour <= 11:
                         dt_am = dt_oman.replace(hour=dt_oman.hour)
                         dt_pm = dt_oman.replace(hour=dt_oman.hour + 12)
                         
@@ -159,19 +162,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             dt_oman = dt_am if (dt_am - oman_now) < (dt_pm - oman_now) else dt_pm
                         elif dt_am < oman_now and dt_pm < oman_now:
                             dt_oman = dt_am + timedelta(days=1)
-                
-                if dt_oman < oman_now:
-                    dt_oman += timedelta(days=1)
+                    
+                    if dt_oman < oman_now:
+                        dt_oman += timedelta(days=1)
 
+            # تنفيذ الحفظ في حالة تم تحديد الوقت
+            if dt_oman:
                 delay = (dt_oman - get_oman_time()).total_seconds()
-                
                 if delay > 0:
-                    # استخراج المهمة من النص
-                    task_text = norm_text.replace(date_str, "").replace("ذكرني", "").replace("نبهني", "").replace("بـ", "").replace("أن", "").strip()
-                    if not task_text or task_text == "ب":
-                        task_text = "تذكير عام"
+                    # تنظيف النص لاستخراج عنوان المهمة (مثل: المحاضرة)
+                    task_text = text.replace(date_str, "").replace("ذكرني", "").replace("نبهني", "").replace("بـ", "").replace("أن", "").strip()
+                    # إزالة حروف الجر المتصلة بالوقت إن وجدت
+                    task_text = re.sub(r'^(في|على|ب)\s+', '', task_text).strip()
+                    
+                    if not task_text or task_text in ["ب", "في", "على"]:
+                        task_text = "تذكير بموعد"
 
-                    # الحفظ في Supabase بتوقيت عُمان مباشرة
                     insert_response = supabase.table("reminders").insert({
                         "chat_id": chat_id,
                         "task": task_text,
@@ -181,27 +187,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_id = insert_response.data[0]['id']
                     
                     context.job_queue.run_once(
-                        send_reminder,
-                        delay,
-                        chat_id=chat_id,
-                        name=str(db_id), # لكي نتمكن من حذفه لاحقاً
-                        data={"db_id": db_id, "task": task_text}
+                        send_reminder, delay, chat_id=chat_id, name=str(db_id), data={"db_id": db_id, "task": task_text}
                     )
                     
                     arabic_period = "صباحاً" if dt_oman.hour < 12 else "مساءً"
                     formatted_time = f"{dt_oman.strftime('%I').lstrip('0')}:{dt_oman.strftime('%M')} {arabic_period}"
                     
                     await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأنبهك بـ: {task_text}\n⏰ الموعد: {formatted_time} ({dt_oman.strftime('%Y-%m-%d')})")
+                    return
                 else:
                     await update.message.reply_text("عذراً، لم أستطع تحديد وقت في المستقبل.")
+                    return
             else:
-                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. جرب 'ذكرني بعد 10 دقائق بـ ...'")
+                await update.message.reply_text("لم أستطع تحديد الوقت بدقة. جرب: 'المحاضرة بعد 10 دقائق'")
+                return
                 
         except Exception as e:
             await update.message.reply_text(f"حدث خطأ، يرجى المحاولة بصيغة أخرى.\n{str(e)}")
         return
 
-    # --- 5. الرد بواسطة جيميناي ---
+    # --- 4. الرد بواسطة جيميناي (لا يعمل إلا إذا لم يكن النص زراً أو تذكيراً) ---
     if model:
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
@@ -218,9 +223,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     task = job_data['task']
     db_id = job_data['db_id']
-    
     await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔔 حان الموعد!\n\n{task}")
-    
     try:
         supabase.table("reminders").delete().eq("id", db_id).execute()
     except Exception as e:
