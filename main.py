@@ -4,14 +4,25 @@ from dateparser.search import search_dates
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from supabase import create_client, Client
+import google.generativeai as genai
 
 # جلب المتغيرات البيئية
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # تهيئة الاتصال بقاعدة البيانات
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# تهيئة جوجل جيميناي
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # استخدام موديل فلاش (يمكنك تغييره إلى gemini-2.0-flash أو أحدث إصدار معتمد لديك)
+    model = genai.GenerativeModel('gemini-2.5-flash') 
+else:
+    model = None
+    print("تحذير: لم يتم العثور على مفتاح GEMINI_API_KEY")
 
 def get_utc_now():
     """الاعتماد على UTC لتخزين التواريخ في قاعدة البيانات بشكل موحد"""
@@ -50,10 +61,12 @@ async def load_pending_reminders(application: Application):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = (
         "أهلاً بك! أنا مساعدك الشخصي 🤖\n"
-        "يمكنني تذكيرك بمواعيدك ومهامك (البيانات محفوظة بأمان ولن تضيع).\n\n"
+        "يمكنني تذكيرك بمواعيدك ومهامك، والإجابة على أسئلتك بذكاء.\n\n"
         "أوامر يمكنك استخدامها:\n"
         "1️⃣ للجدولة: 'ذكرني بكرة 9 الصبح أرسل الإيميل'\n"
         "2️⃣ للتذكيرات: 'قائمة التذكيرات'\n"
+        "3️⃣ للوقت: 'كم الساعة' أو 'الوقت'\n"
+        "💬 أو ببساطة تحدث معي في أي موضوع آخر وسأجيبك!"
     )
     await update.message.reply_text(welcome_message)
 
@@ -61,6 +74,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower().strip()
     chat_id = update.effective_chat.id
     
+    # 1. التحقق من أوامر قائمة التذكيرات
     if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة"]):
         now_utc = get_utc_now().isoformat()
         response = supabase.table("reminders").select("*").gte("remind_at", now_utc).eq("chat_id", chat_id).execute()
@@ -78,6 +92,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
+    # 2. التحقق من أوامر الوقت والساعة
+    if any(word in text for word in ["الوقت", "الساعة"]):
+        now_oman = get_oman_time().strftime('%Y-%m-%d %I:%M %p')
+        await update.message.reply_text(f"⏱️ الوقت الحالي هو: {now_oman}")
+        return
+
+    # 3. التحقق من أوامر إنشاء تذكير جديد
     if any(word in text for word in ["ذكرني", "نبهني", "تذكير", "ذكر"]):
         try:
             oman_now = get_oman_time()
@@ -123,6 +144,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         except Exception as e:
             await update.message.reply_text(f"حدث خطأ، يرجى المحاولة بصيغة أخرى.\n{str(e)}")
+        return
+
+    # 4. إذا لم يكن أي من أوامر البوت، نرسل النص إلى جيميناي
+    if model:
+        try:
+            # إرسال حالة "يكتب..." للمستخدم
+            await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+            # استخدام الدالة غير المتزامنة لكي لا يتوقف البوت
+            response = await model.generate_content_async(update.message.text)
+            await update.message.reply_text(response.text)
+        except Exception as e:
+            print(f"Gemini API Error: {e}")
+            await update.message.reply_text("عذراً، حدث خطأ أثناء التواصل مع الذكاء الاصطناعي 🤕.")
     else:
         await update.message.reply_text("لم أفهم طلبك تماماً 🤔. يمكنك قول 'ذكرني بـ...'")
 
