@@ -12,33 +12,41 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# تهيئة الاتصال بقاعدة البيانات
+# تهيئة الاتصال بقاعدة بيانات Supabase (لحفظ التذكيرات)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# تهيئة جوجل جيميناي
+# تهيئة جوجل جيميناي مع System Prompt
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # استخدام موديل فلاش (يمكنك تغييره إلى gemini-2.0-flash أو أحدث إصدار معتمد لديك)
-    model = genai.GenerativeModel('gemini-2.5-flash') 
+    
+    # التعليمات الأساسية لجيميناي (System Prompt)
+    system_instruction = (
+        "أنت مساعد شخصي ذكي ومفيد عبر تيليجرام. "
+        "1. يجب أن تكون إجاباتك قصيرة جداً، مختصرة، ومباشرة في صلب الموضوع دون مقدمات طويلة. "
+        "2. عند الحاجة لتمييز نص أو جعله عريضاً، استخدم علامة نجمة واحدة فقط مثل *هذا*، ولا تستخدم نجمتين متتاليتين أبداً."
+    )
+    
+    # استخدام موديل فلاش مع إرفاق التعليمات
+    model = genai.GenerativeModel(
+        'gemini-2.5-flash',
+        system_instruction=system_instruction
+    ) 
 else:
     model = None
     print("تحذير: لم يتم العثور على مفتاح GEMINI_API_KEY")
 
 def get_utc_now():
-    """الاعتماد على UTC لتخزين التواريخ في قاعدة البيانات بشكل موحد"""
     return datetime.utcnow()
 
 def get_oman_time():
-    """للعرض فقط بتوقيت عُمان"""
     return get_utc_now() + timedelta(hours=4)
 
 async def load_pending_reminders(application: Application):
-    """دالة تعمل عند تشغيل البوت لجلب التذكيرات التي لم تُنفذ بسبب نوم السيرفر"""
+    """جلب التذكيرات المعلقة من Supabase عند بدء التشغيل"""
     print("جاري التحقق من التذكيرات المعلقة في قاعدة البيانات...")
     now_utc = get_utc_now().isoformat()
     
     try:
-        # جلب التذكيرات التي وقتها في المستقبل
         response = supabase.table("reminders").select("*").gte("remind_at", now_utc).execute()
         reminders = response.data
         
@@ -54,19 +62,19 @@ async def load_pending_reminders(application: Application):
                     chat_id=row['chat_id'],
                     data=job_info
                 )
-        print(f"تمت إعادة جدولة {len(reminders)} تذكير بنجاح.")
+        print(f"تمت إعادة جدولة {len(reminders)} تذكير بنجاح من Supabase.")
     except Exception as e:
         print(f"خطأ أثناء جلب التذكيرات: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = (
         "أهلاً بك! أنا مساعدك الشخصي 🤖\n"
-        "يمكنني تذكيرك بمواعيدك ومهامك، والإجابة على أسئلتك بذكاء.\n\n"
+        "يمكنني تذكيرك بمواعيدك (محفوظة في قاعدة البيانات)، والإجابة باختصار بذكاء.\n\n"
         "أوامر يمكنك استخدامها:\n"
         "1️⃣ للجدولة: 'ذكرني بكرة 9 الصبح أرسل الإيميل'\n"
         "2️⃣ للتذكيرات: 'قائمة التذكيرات'\n"
         "3️⃣ للوقت: 'كم الساعة' أو 'الوقت'\n"
-        "💬 أو ببساطة تحدث معي في أي موضوع آخر وسأجيبك!"
+        "💬 أو تحدث معي وسأجيبك باختصار!"
     )
     await update.message.reply_text(welcome_message)
 
@@ -74,7 +82,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower().strip()
     chat_id = update.effective_chat.id
     
-    # 1. التحقق من أوامر قائمة التذكيرات
+    # 1. قائمة التذكيرات
     if any(word in text for word in ["تذكيراتي", "تذكيرات", "مهام", "قائمة"]):
         now_utc = get_utc_now().isoformat()
         response = supabase.table("reminders").select("*").gte("remind_at", now_utc).eq("chat_id", chat_id).execute()
@@ -92,13 +100,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # 2. التحقق من أوامر الوقت والساعة
+    # 2. الوقت
     if any(word in text for word in ["الوقت", "الساعة"]):
         now_oman = get_oman_time().strftime('%Y-%m-%d %I:%M %p')
         await update.message.reply_text(f"⏱️ الوقت الحالي هو: {now_oman}")
         return
 
-    # 3. التحقق من أوامر إنشاء تذكير جديد
+    # 3. إنشاء وحفظ التذكير في Supabase
     if any(word in text for word in ["ذكرني", "نبهني", "تذكير", "ذكر"]):
         try:
             oman_now = get_oman_time()
@@ -110,7 +118,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date_str, dt_oman = dates[0]
                 dt_oman = dt_oman.replace(tzinfo=None)
                 
-                # تحويل الوقت لـ UTC قبل الحفظ في قاعدة البيانات
                 dt_utc = dt_oman - timedelta(hours=4)
                 delay = (dt_utc - get_utc_now()).total_seconds()
                 
@@ -119,7 +126,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not task_text or task_text == "ب":
                         task_text = "تذكير عام"
 
-                    # حفظ في قاعدة البيانات
+                    # --> هنا يتم حفظ التذكير في Supabase <--
                     insert_response = supabase.table("reminders").insert({
                         "chat_id": chat_id,
                         "task": task_text,
@@ -128,7 +135,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     db_id = insert_response.data[0]['id']
                     
-                    # الجدولة في الذاكرة
                     context.job_queue.run_once(
                         send_reminder,
                         delay,
@@ -146,14 +152,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"حدث خطأ، يرجى المحاولة بصيغة أخرى.\n{str(e)}")
         return
 
-    # 4. إذا لم يكن أي من أوامر البوت، نرسل النص إلى جيميناي
+    # 4. الرد بواسطة جيميناي
     if model:
         try:
-            # إرسال حالة "يكتب..." للمستخدم
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
-            # استخدام الدالة غير المتزامنة لكي لا يتوقف البوت
             response = await model.generate_content_async(update.message.text)
-            await update.message.reply_text(response.text)
+            
+            # استبدال إضافي كإجراء احترازي في حال أصر النموذج على استخدام **
+            final_text = response.text.replace("**", "*")
+            
+            await update.message.reply_text(final_text)
         except Exception as e:
             print(f"Gemini API Error: {e}")
             await update.message.reply_text("عذراً، حدث خطأ أثناء التواصل مع الذكاء الاصطناعي 🤕.")
@@ -161,25 +169,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لم أفهم طلبك تماماً 🤔. يمكنك قول 'ذكرني بـ...'")
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """إرسال الإشعار للمستخدم وحذفه من قاعدة البيانات"""
     job_data = context.job.data
     task = job_data['task']
     db_id = job_data['db_id']
     
-    # رسالة التذكير المختصرة كما طلبت
     await context.bot.send_message(
         chat_id=context.job.chat_id, 
         text=f"🔔 حان الموعد!\n\n{task}"
     )
     
-    # حذف التذكير من قاعدة البيانات بعد تنفيذه حتى لا يتراكم
+    # حذف التذكير من Supabase بعد تنفيذه
     try:
         supabase.table("reminders").delete().eq("id", db_id).execute()
     except Exception as e:
         print(f"خطأ في حذف التذكير من DB: {e}")
 
 def main():
-    # استخدام post_init لتشغيل دالة استرجاع التذكيرات فور بدء البوت
     application = Application.builder().token(TOKEN).post_init(load_pending_reminders).build()
 
     application.add_handler(CommandHandler("start", start))
