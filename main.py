@@ -2,8 +2,8 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from dateparser.search import search_dates 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from supabase import create_client, Client
 import google.generativeai as genai
 
@@ -30,6 +30,7 @@ else:
 OMAN_TZ = timezone(timedelta(hours=4), name="Asia/Muscat")
 
 def get_oman_time():
+    # إرجاع الوقت الحالي كـ Timezone-Aware
     return datetime.now(OMAN_TZ)
 
 awaiting_reminder_users = set()
@@ -41,6 +42,7 @@ async def load_pending_reminders(application: Application):
         response = supabase.table("reminders").select("*").gte("remind_at", now_oman).execute()
         reminders = response.data
         for row in reminders:
+            # بما أن الوقت في DB محفوظ بـ offset +04:00، سيتم تحويله بشكل صحيح
             remind_at = datetime.fromisoformat(row['remind_at'])
             delay = (remind_at - get_oman_time()).total_seconds()
             if delay > 0:
@@ -78,24 +80,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         awaiting_reminder_users.discard(chat_id)
         now_oman = get_oman_time().isoformat()
         response = supabase.table("reminders").select("*").gte("remind_at", now_oman).eq("chat_id", chat_id).order("remind_at").execute()
-        
         if not response.data:
             await update.message.reply_text("📭 ليس لديك أي تذكيرات مجدولة حالياً.")
             return
-            
         msg = "📋 قائمة التذكيرات المجدولة:\n\n"
-        keyboard = []
         for i, row in enumerate(response.data, 1):
             task_time_oman = datetime.fromisoformat(row['remind_at'])
             arabic_period = "صباحاً" if task_time_oman.hour < 12 else "مساءً"
             formatted_time = f"{task_time_oman.strftime('%I').lstrip('0')}:{task_time_oman.strftime('%M')} {arabic_period}"
             msg += f"{i}. {row['task']} (⏰ {task_time_oman.strftime('%Y-%m-%d')} - {formatted_time})\n"
-            
-            # إضافة زر الحذف تحت الرسالة
-            keyboard.append([InlineKeyboardButton(f"❌ حذف التذكير ({row['task'][:10]}...)", callback_data=f"del_{row['id']}")])
-            
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(msg, reply_markup=reply_markup)
+        await update.message.reply_text(msg)
         return
 
     if text == "⏱️ الوقت الحالي":
@@ -103,6 +97,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now_oman = get_oman_time()
         arabic_period = "صباحاً" if now_oman.hour < 12 else "مساءً"
         await update.message.reply_text(f"⏱️ الوقت الحالي هو: {now_oman.strftime('%I').lstrip('0')}:{now_oman.strftime('%M')} {arabic_period}")
+        return
+
+    if any(word in text_lower for word in ["احذف", "إلغاء", "حذف", "الغي"]) and "تذكير" in text_lower:
+        match = re.search(r'\d+', text)
+        if match:
+            idx = int(match.group()) - 1
+            now_oman = get_oman_time().isoformat()
+            response = supabase.table("reminders").select("*").gte("remind_at", now_oman).eq("chat_id", chat_id).order("remind_at").execute()
+            if 0 <= idx < len(response.data):
+                target_id = response.data[idx]['id']
+                supabase.table("reminders").delete().eq("id", target_id).execute()
+                current_jobs = context.job_queue.get_jobs_by_name(str(target_id))
+                for job in current_jobs:
+                    job.schedule_removal()
+                await update.message.reply_text(f"✅ تم حذف التذكير رقم {idx + 1} بنجاح.")
+            else:
+                await update.message.reply_text("❌ الرقم غير صحيح. قل 'تذكيراتي' لمعرفة الأرقام الصحيحة.")
+        else:
+             await update.message.reply_text("❌ يرجى تحديد رقم التذكير، مثال: 'احذف التذكير 1'")
         return
 
     is_reminder_intent = chat_id in awaiting_reminder_users or any(word in text_lower for word in ["ذكرني", "نبهني", "تذكير", "ذكر"])
@@ -116,7 +129,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dt_oman = None
             date_str = ""
             
-            # 1. التقاط الكلمات العربية الشائعة للمدد النسبية
+            # تحسين التقاط الكلمات العربية الشائعة للوقت
             rel_match = re.search(r'بعد\s+(\d+)\s*(دقيق|دقائق|ساع|يوم|ايام|أيام)', text_lower)
             if rel_match:
                 num = int(rel_match.group(1))
@@ -130,26 +143,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date_str = rel_match.group(0)
             
             else:
-                # 2. حل مشكلة التاريخ المفقود بإجبار dateparser على فهم "اليوم" إذا لم يتم ذكر يوم
-                text_to_parse = text_lower
-                day_indicators = ["اليوم", "غدا", "غداً", "بكرة", "يوم", "بعد", "تاريخ", "امس", "الاحد", "الاثنين", "الثلاثاء", "الاربعاء", "الخميس", "الجمعة", "السبت"]
-                if not any(word in text_lower for word in day_indicators):
-                    text_to_parse = "اليوم " + text_lower
-
+                # إعدادات dateparser متوافقة مع المناطق الزمنية
                 settings = {
                     'TIMEZONE': '+0400', 
                     'RELATIVE_BASE': oman_now.replace(tzinfo=None), 
                     'PREFER_DATES_FROM': 'future', 
                     'RETURN_AS_TIMEZONE_AWARE': True
                 }
-                dates = search_dates(text_to_parse, languages=['ar', 'en'], settings=settings)
+                dates = search_dates(text_lower, languages=['ar', 'en'], settings=settings)
                 
                 if dates:
-                    # تعويض الخطأ في حال لم نستخدم الكلمة المضافة في النص الأصلي
                     date_str, parsed_dt = dates[0]
-                    if date_str.startswith("اليوم "):
-                        date_str = date_str.replace("اليوم ", "")
-
+                    
+                    # التأكد من أن الوقت المرجع يتبع توقيت عمان
                     if parsed_dt.tzinfo is None:
                         dt_oman = parsed_dt.replace(tzinfo=OMAN_TZ)
                     else:
@@ -170,7 +176,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         elif dt_am < oman_now and dt_pm < oman_now:
                             dt_oman = dt_am + timedelta(days=1)
                     
-                    # إذا كان الوقت قد مضى اليوم، اجعله غداً في نفس الوقت
                     if dt_oman < oman_now:
                         dt_oman += timedelta(days=1)
 
@@ -183,6 +188,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not task_text or task_text in ["ب", "في", "على"]:
                         task_text = "تذكير بموعد"
 
+                    # يتم الحفظ الآن بصيغة ISO شاملة للـ +04:00
                     insert_response = supabase.table("reminders").insert({
                         "chat_id": chat_id,
                         "task": task_text,
@@ -223,28 +229,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("لم أفهم طلبك تماماً 🤔. يمكنك قول 'ذكرني بـ...'")
 
-# دالة التعامل مع ضغطات الأزرار الشفافة (Inline Buttons)
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer() 
-    data = query.data
-
-    if data.startswith("del_"):
-        target_id = data.split("_")[1]
-        try:
-            # 1. الحذف من قاعدة البيانات
-            supabase.table("reminders").delete().eq("id", target_id).execute()
-            
-            # 2. إيقاف الجدولة
-            current_jobs = context.job_queue.get_jobs_by_name(str(target_id))
-            for job in current_jobs:
-                job.schedule_removal()
-                
-            # 3. إشعار المستخدم وتحديث الرسالة
-            await query.edit_message_text(f"✅ تم حذف التذكير بنجاح.")
-        except Exception as e:
-            await query.edit_message_text("❌ حدث خطأ أثناء الحذف.")
-
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     task = job_data['task']
@@ -257,11 +241,8 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     application = Application.builder().token(TOKEN).post_init(load_pending_reminders).build()
-    
-    # إضافة Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(CallbackQueryHandler(button_callback)) # للتعامل مع أزرار الحذف الشفافة
 
     PORT = int(os.environ.get('PORT', '5000'))
     RENDER_URL = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
