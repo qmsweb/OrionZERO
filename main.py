@@ -259,7 +259,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     """إرسال التذكير لمرة واحدة وحذفه من القاعدة"""
     job_data = context.job.data
-    await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔔 حان الموعد!\n\n*{job_data['task']}*")
+    await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔔 حان الموعد!\n\n{job_data['task']}")
     try:
         supabase.table("reminders").delete().eq("id", job_data['db_id']).execute()
     except Exception as e:
