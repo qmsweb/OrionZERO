@@ -226,9 +226,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except json.JSONDecodeError:
         await update.message.reply_text("عذراً، حدث خطأ في معالجة طلبك داخلياً.")
-    except Exception as e:
-        print(f"Error: {e}")
-        await update.message.reply_text("عذراً، حدث خطأ غير متوقع.")
+        except Exception as e:
+        error_msg = str(e)
+        print(f"Error: {error_msg}")
+        await update.message.reply_text(f"عذراً، حدث خطأ غير متوقع. \nتفاصيل الخطأ:\n`{error_msg}`")
+
 
 
 # ----------------- التعامل مع الأزرار (حذف الروتين) -----------------
