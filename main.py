@@ -179,3 +179,4 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 http://googleusercontent.com/immersive_entry_chip/0
 http://googleusercontent.com/immersive_entry_chip/1
 
+**هل تود مساعدتك في أي شيء آخر بخصوص إعدادات البوت، مثل التأكد من تشغيله على الاستضافة أو إعداد الجداول في Supabase؟**
