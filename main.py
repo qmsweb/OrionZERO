@@ -83,11 +83,21 @@ def schedule_routine_job(application: Application, chat_id, db_id, task, time_st
     h, m = map(int, time_str.split(':'))
     # تعيين الوقت مع المنطقة الزمنية لعُمان
     t = time(hour=h, minute=m, tzinfo=OMAN_TZ)
+    
+    # التأكد من أن الأيام عبارة عن قائمة أرقام (تفادياً لأخطاء قاعدة البيانات)
+    if isinstance(days, str):
+        try:
+            days = json.loads(days)
+        except:
+            days = [0, 1, 2, 3, 4, 5, 6]
+            
+    days_tuple = tuple(int(d) for d in days)
+
     # استخدام run_daily لجدولة الروتين حسب الأيام المطلوبة
     application.job_queue.run_daily(
         send_routine_reminder, 
         time=t, 
-        days=tuple(days), 
+        days=days_tuple, 
         chat_id=chat_id, 
         name=f"routine_{db_id}", 
         data={"db_id": db_id, "task": task}
@@ -142,10 +152,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for row in response.data:
             h, m = map(int, row['time'].split(':'))
             arabic_period = "صباحاً" if h < 12 else "مساءً"
-            formatted_time = f"{h if h<=12 else h-12}:{m:02d} {arabic_period}"
+            h_12 = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+            formatted_time = f"{h_12}:{m:02d} {arabic_period}"
             
-            routine_days_ar = [days_names[d] for d in row['days']]
-            days_str = "كل يوم" if len(row['days']) == 7 else "، ".join(routine_days_ar)
+            # التأكد من الصيغة الصحيحة للأيام المستدعاة
+            days_list = row['days']
+            if isinstance(days_list, str):
+                try:
+                    days_list = json.loads(days_list)
+                except:
+                    days_list = [0, 1, 2, 3, 4, 5, 6]
+                    
+            routine_days_ar = [days_names[int(d)] for d in days_list]
+            days_str = "كل يوم" if len(days_list) == 7 else "، ".join(routine_days_ar)
             
             msg = f"📌 المهمة: {row['task']}\n⏰ الوقت: {formatted_time}\n📅 الأيام: {days_str}"
             
@@ -175,120 +194,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await model.generate_content_async(prompt)
         ai_output = response.text.strip()
 
-        if ai_output.startswith("```json"): ai_output = ai_output[7:-3].strip()
-        elif ai_output.startswith("```"): ai_output = ai_output[3:-3].strip()
+        if ai_output.startswith("
+http://googleusercontent.com/immersive_entry_chip/0
+http://googleusercontent.com/immersive_entry_chip/1
 
-        parsed_data = json.loads(ai_output)
-
-        if not parsed_data:
-            await update.message.reply_text("عذراً، لم أتمكن من استخراج موعد أو روتين واضح. جرب صيغة أوضح.")
-            return
-
-        task_text = parsed_data.get("task", "تذكير")
-        req_type = parsed_data.get("type", "reminder")
-
-        if req_type == "routine" and "time" in parsed_data and "days" in parsed_data:
-            time_str = parsed_data["time"]
-            days = parsed_data["days"]
-            
-            # حفظ الروتين في قاعدة البيانات
-            insert_res = supabase.table("routines").insert({
-                "chat_id": chat_id,
-                "task": task_text,
-                "time": time_str,
-                "days": days
-            }).execute()
-            
-            db_id = insert_res.data[0]['id']
-            
-            # جدولة الروتين
-            schedule_routine_job(context.application, chat_id, db_id, task_text, time_str, days)
-            
-            await update.message.reply_text(f"✅ تم تفعيل الروتين بنجاح!\nسأذكرك بـ: *{task_text}*")
-
-        elif req_type == "reminder" and "datetime" in parsed_data:
-            dt_oman = datetime.fromisoformat(parsed_data["datetime"])
-            delay = (dt_oman - get_oman_time()).total_seconds()
-            
-            if delay > 0:
-                insert_res = supabase.table("reminders").insert({
-                    "chat_id": chat_id, "task": task_text, "remind_at": dt_oman.isoformat()
-                }).execute()
-                
-                db_id = insert_res.data[0]['id']
-                context.job_queue.run_once(send_reminder, delay, chat_id=chat_id, name=f"rem_{db_id}", data={"db_id": db_id, "task": task_text})
-                
-                arabic_period = "صباحاً" if dt_oman.hour < 12 else "مساءً"
-                formatted_time = f"{dt_oman.strftime('%I').lstrip('0')}:{dt_oman.strftime('%M')} {arabic_period}"
-                await update.message.reply_text(f"✅ تمت الجدولة بنجاح!\nسأنبهك بـ: *{task_text}*\n⏰ الموعد: {formatted_time}")
-            else:
-                await update.message.reply_text("عذراً، الوقت المطلوب يقع في الماضي.")
-
-    except json.JSONDecodeError:
-        await update.message.reply_text("عذراً، حدث خطأ في معالجة طلبك داخلياً.")
-        except Exception as e:
-        error_msg = str(e)
-        print(f"Error: {error_msg}")
-        await update.message.reply_text(f"عذراً، حدث خطأ غير متوقع. \nتفاصيل الخطأ:\n`{error_msg}`")
-
-
-
-# ----------------- التعامل مع الأزرار (حذف الروتين) -----------------
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    if data.startswith("del_routine_"):
-        routine_id = data.split("del_routine_")[1]
-        
-        # حذفه من قاعدة البيانات
-        supabase.table("routines").delete().eq("id", routine_id).execute()
-        
-        # إيقاف المهمة المجدولة في النظام
-        current_jobs = context.job_queue.get_jobs_by_name(f"routine_{routine_id}")
-        for job in current_jobs:
-            job.schedule_removal()
-            
-        await query.edit_message_text("✅ تم حذف هذا الروتين بنجاح.")
-
-
-# ----------------- دوال إرسال التنبيهات -----------------
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """إرسال التذكير لمرة واحدة وحذفه من القاعدة"""
-    job_data = context.job.data
-    await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔔 حان الموعد!\n\n*{job_data['task']}*")
-    try:
-        supabase.table("reminders").delete().eq("id", job_data['db_id']).execute()
-    except Exception as e:
-        pass
-
-async def send_routine_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """إرسال التذكير الروتيني (لا يحذف من القاعدة لأنه متكرر)"""
-    job_data = context.job.data
-    await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔁 تذكير روتيني:\n\n*{job_data['task']}*")
-
-
-# ----------------- التشغيل -----------------
-
-def main():
-    application = Application.builder().token(TOKEN).post_init(load_pending_reminders).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(CallbackQueryHandler(handle_callback)) # معالج الأزرار
-
-    PORT = int(os.environ.get('PORT', '5000'))
-    RENDER_URL = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
-
-    if RENDER_URL:
-        application.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f"https://{RENDER_URL}/{TOKEN}")
-    else:
-        print("Bot is running...")
-        application.run_polling()
-
-if __name__ == '__main__':
-    main()
-
+هل ترغب أن نختبر إضافة روتين جديد سوياً للتأكد من أن كل شيء يعمل بسلاسة الآن؟
