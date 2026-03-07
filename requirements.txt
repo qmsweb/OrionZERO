@@ -1,4 +1,4 @@
 python-telegram-bot[job-queue,webhooks]==21.6
 dateparser==1.2.0
 supabase==2.5.1
-google-generativeai
+openai
